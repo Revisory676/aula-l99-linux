@@ -178,3 +178,112 @@ class HidrawTransport:
         buffer[0] = report_id
         fcntl.ioctl(self._fd, request, buffer, True)
         return bytes(buffer)
+
+
+def query_keyboard_battery(dev: HidrawDevice | None = None) -> int | None:
+    """Query live battery percentage from the AULA L99 keyboard over 2.4GHz dongle."""
+    from . import protocol
+    if dev is None:
+        dev = find_l99()
+    if not dev:
+        return None
+    try:
+        with HidrawTransport(dev.path, timeout_seconds=1.2) as transport:
+            transport.drain()
+            pkt = protocol.build_dongle_battery_query()
+            transport.write(bytes([protocol.REPORT_ID]) + pkt)
+            reply = transport.read_report(64)
+            return protocol.parse_dongle_battery_reply(reply)
+    except Exception:
+        return None
+
+
+def set_keyboard_lighting(
+    mode: int,
+    rgb: tuple[int, int, int] = (255, 0, 0),
+    direction: int = 0,
+    brightness: int = 5,
+    speed: int = 3,
+    dev: HidrawDevice | None = None,
+) -> bool:
+    """Set RGB lighting effect for AULA L99 across both 2.4GHz dongle and cable."""
+    from . import protocol
+    if dev is None:
+        dev = find_l99()
+    if not dev:
+        return False
+    try:
+        with HidrawTransport(dev.path, timeout_seconds=1.5) as transport:
+            transport.drain()
+            if dev.is_dongle:
+                pkt = protocol.build_dongle_lighting_packet(mode, rgb, direction, brightness, speed)
+                transport.write(bytes([protocol.REPORT_ID]) + pkt)
+                reply = transport.read_report(64)
+                return bool(reply and reply[0] == 0x05)
+            else:
+                txs = protocol.build_effect_transfer(mode, rgb=rgb, speed=speed, brightness=brightness)
+                for tx in txs:
+                    transport.set_feature(bytes([protocol.REPORT_ID]) + tx.outgoing)
+                    time.sleep(protocol.PACKET_GAP_SECONDS)
+                return True
+    except Exception:
+        return False
+
+
+def set_keyboard_settings(
+    sleep_level: int | None = None,
+    response_level: int | None = None,
+    dev: HidrawDevice | None = None,
+) -> bool:
+    """Configure sleep timeout (0-3) and/or key debounce response level (1-5)."""
+    from . import protocol
+    if dev is None:
+        dev = find_l99()
+    if not dev:
+        return False
+    try:
+        with HidrawTransport(dev.path, timeout_seconds=1.5) as transport:
+            transport.drain()
+            if dev.is_dongle:
+                if sleep_level is not None:
+                    pkt = protocol.build_dongle_sleep_time_packet(sleep_level)
+                    transport.write(bytes([protocol.REPORT_ID]) + pkt)
+                    transport.read_report(64)
+                if response_level is not None:
+                    pkt = protocol.build_dongle_key_response_packet(response_level)
+                    transport.write(bytes([protocol.REPORT_ID]) + pkt)
+                    transport.read_report(64)
+                return True
+            else:
+                s_val = sleep_level if sleep_level is not None else 2
+                r_val = response_level if response_level is not None else 1
+                txs = protocol.build_settings_transfer(s_val, r_val)
+                for tx in txs:
+                    transport.set_feature(bytes([protocol.REPORT_ID]) + tx.outgoing)
+                    time.sleep(protocol.PACKET_GAP_SECONDS)
+                return True
+    except Exception:
+        return False
+
+
+def set_keyboard_shortcut_locks(
+    win_lock: bool = False,
+    alt_tab_lock: bool = False,
+    alt_f4_lock: bool = False,
+    dev: HidrawDevice | None = None,
+) -> bool:
+    """Toggle gaming shortcut locks (Win key, Alt+Tab, Alt+F4)."""
+    from . import protocol
+    if dev is None:
+        dev = find_l99()
+    if not dev or not dev.is_dongle:
+        return False
+    try:
+        with HidrawTransport(dev.path, timeout_seconds=1.5) as transport:
+            transport.drain()
+            pkt = protocol.build_dongle_shortcut_lock_packet(win_lock, alt_tab_lock, alt_f4_lock)
+            transport.write(bytes([protocol.REPORT_ID]) + pkt)
+            reply = transport.read_report(64)
+            return bool(reply and reply[0] == 0x07)
+    except Exception:
+        return False

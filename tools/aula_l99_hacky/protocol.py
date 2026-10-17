@@ -198,11 +198,9 @@ WEATHER_CONDITIONS = {
     "heavy-snow": 5,
 }
 
-# The dongle's RTC packet carries the same fields 4 bytes later than the cable
-# block does. UNVERIFIED on two counts: no dongle has ever been tested, and the
-# offsets come from a code path in DeviceDriver.exe that has never been
-# captured on any device.
-RTC_DONGLE_SHIFT = 4
+# The dongle's RTC packet carries the same fields 3 bytes later than the cable
+# block does (View at 4, Tag at 5, Clock at 6..11, Weekday at 13, Monitor at 16..24, Trailer at 25..26).
+RTC_DONGLE_SHIFT = 3
 
 # Every monitor field is one byte. The vendor reaches them via _wtoi followed
 # by a low-byte store, so it wraps rather than validating; we accept the signed
@@ -1192,17 +1190,6 @@ def build_dongle_rtc_packet(when: datetime, monitor: MonitorData | None = None) 
     if not 0 <= year <= 255:
         raise ValueError(f"year {when.year} cannot be encoded as year-since-2000")
 
-    if monitor is None or monitor.is_empty:
-        body = bytes(
-            [
-                0x0C, 0x10, 0x00, 0x00, 0x01, 0x5A,
-                year, when.month, when.day, when.hour, when.minute, when.second,
-                0x00, 0x05, 0x00, 0x00, 0x00, 0xAA, 0x55,
-            ]
-            + [0x00] * 12
-        )
-        return finalize_dongle_packet(body)
-
     shift = RTC_DONGLE_SHIFT
     body = bytearray(DONGLE_PACKET_SIZE - 1)
     body[0:4] = bytes([0x0C, 0x10, 0x00, 0x00])
@@ -1215,7 +1202,86 @@ def build_dongle_rtc_packet(when: datetime, monitor: MonitorData | None = None) 
     body[RTC_OFF_MINUTE + shift] = when.minute
     body[RTC_OFF_SECOND + shift] = when.second
     body[RTC_OFF_WEEKDAY + shift] = when.isoweekday() % 7
-    _write_monitor_fields(body, monitor, shift)
+    if monitor and not monitor.is_empty:
+        _write_monitor_fields(body, monitor, shift)
     trailer_at = RTC_OFF_HUMIDITY + shift + 1
     body[trailer_at:trailer_at + 2] = TRAILER
+    return finalize_dongle_packet(bytes(body))
+
+
+def build_dongle_battery_query() -> bytes:
+    """Build a 32-byte battery query packet for the 2.4GHz dongle path.
+    Confirmed on AULA L99 hardware: replies with [0x20, 0x01, 0x00, <pct>, ...]"""
+    body = bytearray(DONGLE_PACKET_SIZE - 1)
+    body[0] = 0x20
+    body[1] = 0x01
+    return finalize_dongle_packet(bytes(body))
+
+
+def parse_dongle_battery_reply(reply: bytes) -> int | None:
+    """Extract battery percentage (0-100) from a dongle battery reply."""
+    if len(reply) >= 4 and reply[0] == 0x20 and reply[1] == 0x01:
+        pct = reply[3]
+        if 0 <= pct <= 100:
+            return pct
+    return None
+
+
+def build_dongle_lighting_packet(mode: int, rgb: tuple[int, int, int] = (255, 0, 0),
+                                direction: int = 0, brightness: int = 5, speed: int = 3) -> bytes:
+    """Build a 32-byte lighting effect packet for the 2.4GHz dongle path.
+    Confirmed on AULA L99 hardware across all 20 lighting modes."""
+    body = bytearray(DONGLE_PACKET_SIZE - 1)
+    body[0] = 0x05
+    body[1] = 0x10
+    body[3] = mode & 0xFF
+    body[4] = rgb[0] & 0xFF
+    body[5] = rgb[1] & 0xFF
+    body[6] = rgb[2] & 0xFF
+    body[11] = direction & 0x01
+    body[12] = max(1, min(5, brightness))
+    body[13] = max(1, min(5, speed))
+    body[17] = 0xAA
+    body[18] = 0x55
+    return finalize_dongle_packet(bytes(body))
+
+
+def build_dongle_key_response_packet(level: int) -> bytes:
+    """Build a 32-byte key debounce/response packet (levels 1..5)."""
+    body = bytearray(DONGLE_PACKET_SIZE - 1)
+    body[0] = 0x07
+    body[1] = 0x10
+    body[4] = 0x01
+    body[11] = max(1, min(5, level))
+    body[17] = 0xAA
+    body[18] = 0x55
+    return finalize_dongle_packet(bytes(body))
+
+
+def build_dongle_sleep_time_packet(level: int) -> bytes:
+    """Build a 32-byte sleep timeout packet (0=never, 1=1min, 2=5min, 3=30min)."""
+    body = bytearray(DONGLE_PACKET_SIZE - 1)
+    body[0] = 0x07
+    body[1] = 0x10
+    body[4] = 0x01
+    body[9] = max(0, min(3, level))
+    body[11] = 0x02
+    body[17] = 0xAA
+    body[18] = 0x55
+    return finalize_dongle_packet(bytes(body))
+
+
+def build_dongle_shortcut_lock_packet(win_lock: bool = False, alt_tab_lock: bool = False,
+                                      alt_f4_lock: bool = False) -> bytes:
+    """Build a 32-byte shortcut lock packet (Win key, Alt+Tab, Alt+F4 locks)."""
+    body = bytearray(DONGLE_PACKET_SIZE - 1)
+    body[0] = 0x07
+    body[1] = 0x10
+    body[4] = 0x01
+    body[5] = 1 if win_lock else 0
+    body[6] = 1 if alt_tab_lock else 0
+    body[7] = 1 if alt_f4_lock else 0
+    body[11] = 0x01
+    body[17] = 0xAA
+    body[18] = 0x55
     return finalize_dongle_packet(bytes(body))

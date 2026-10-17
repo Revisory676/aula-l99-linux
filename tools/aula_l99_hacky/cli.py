@@ -215,23 +215,64 @@ def cmd_read_color(args: argparse.Namespace) -> int:
 
 def cmd_effect(args: argparse.Namespace) -> int:
     device = find_l99()
-    if not _require_cable(device, "selecting effects"):
+    if not device:
+        print("error: no AULA L99 keyboard found", file=sys.stderr)
         return 1
 
     try:
         effect_id = int(args.effect, 0)
         rgb = protocol.parse_rgb(args.color) if args.color else (0xFF, 0x00, 0x00)
-        blocks_args = dict(rgb=rgb, speed=args.speed, brightness=args.brightness)
-        transactions = protocol.build_effect_transfer(effect_id, **blocks_args)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     name = protocol.EFFECT_NAMES.get(effect_id, "unknown")
+    direction = getattr(args, "direction", 0)
     print(f"using {device.path}; effect 0x{effect_id:02X} ({name}) "
           f"colour #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X} "
-          f"speed {args.speed} brightness {args.brightness}")
+          f"speed {args.speed} brightness {args.brightness} direction {direction}")
+
+    if device.is_dongle:
+        from .device import set_keyboard_lighting
+        ok = set_keyboard_lighting(effect_id, rgb, direction, args.brightness, args.speed, device)
+        if not ok:
+            print("error: failed to apply effect on dongle", file=sys.stderr)
+            return 1
+        return 0
+
+    blocks_args = dict(rgb=rgb, speed=args.speed, brightness=args.brightness)
+    transactions = protocol.build_effect_transfer(effect_id, **blocks_args)
     return 1 if _run_sequence(device, transactions, args) else 0
+
+
+def cmd_battery(args: argparse.Namespace) -> int:
+    from .device import query_keyboard_battery
+    device = find_l99()
+    if not device:
+        print("error: no AULA L99 keyboard found", file=sys.stderr)
+        return 1
+    pct = query_keyboard_battery(device)
+    if pct is not None:
+        print(f"AULA L99 Battery: {pct}%")
+        return 0
+    else:
+        print("error: could not read battery level", file=sys.stderr)
+        return 1
+
+
+def cmd_win_lock(args: argparse.Namespace) -> int:
+    from .device import set_keyboard_shortcut_locks
+    device = find_l99()
+    if not device:
+        print("error: no AULA L99 keyboard found", file=sys.stderr)
+        return 1
+    ok = set_keyboard_shortcut_locks(win_lock=bool(args.win_lock), dev=device)
+    if ok:
+        print(f"Windows key lock: {'ENABLED' if args.win_lock else 'DISABLED'}")
+        return 0
+    else:
+        print("error: failed to set Windows key lock", file=sys.stderr)
+        return 1
 
 
 def _monitor_from_args(args: argparse.Namespace) -> protocol.MonitorData:
@@ -333,23 +374,34 @@ def cmd_rtc(args: argparse.Namespace) -> int:
 
 def cmd_settings(args: argparse.Namespace) -> int:
     device = find_l99()
-    if not _require_cable(device, "the settings panel"):
+    if not device:
+        print("error: no AULA L99 keyboard found", file=sys.stderr)
         return 1
 
     try:
         sleep_time = int(args.settings[0], 0)
         response_time = int(args.settings[1], 0)
-        transactions = protocol.build_settings_transfer(sleep_time, response_time)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    minutes = protocol.SLEEP_TIME_MINUTES[sleep_time]
-    delays = protocol.RESPONSE_TIME_DELAYS_MS[response_time]
+    minutes = protocol.SLEEP_TIME_MINUTES[sleep_time] if sleep_time < len(protocol.SLEEP_TIME_MINUTES) else sleep_time
+    delays = protocol.RESPONSE_TIME_DELAYS_MS.get(response_time, ((0, 0), (0, 0), (0, 0)))
     print(f"using {device.path}; sleep time {sleep_time} "
           f"({'no sleep' if minutes == 0 else f'{minutes} min'}), "
           f"response level {response_time} "
           f"(wired ~{delays[0][0]}-{delays[0][1]} ms)")
+
+    if device.is_dongle:
+        from .device import set_keyboard_settings
+        ok = set_keyboard_settings(sleep_time, response_time, device)
+        if not ok:
+            print("error: failed to apply settings on dongle", file=sys.stderr)
+            return 1
+        _record_settings(sleep_time, response_time)
+        return 0
+
+    transactions = protocol.build_settings_transfer(sleep_time, response_time)
     if _run_sequence(device, transactions, args):
         return 1
     _record_settings(sleep_time, response_time)
@@ -450,6 +502,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="effect speed %(default)s (1=slowest, 5=fastest)")
     parser.add_argument("--brightness", type=int, default=protocol.EFFECT_BRIGHTNESS_MAX,
                         help="effect brightness (1..5, default %(default)s)")
+    parser.add_argument("--direction", type=int, default=0, choices=[0, 1],
+                        help="effect direction for rolling/flowing modes (0=default, 1=inverted)")
+    parser.add_argument("--battery", action="store_true",
+                        help="query and display the keyboard's live battery percentage")
+    parser.add_argument("--win-lock", type=int, choices=[0, 1],
+                        help="lock (1) or unlock (0) the Windows key on the keyboard")
     parser.add_argument("--rtc", action="store_true",
                         help="set the keyboard's clock, and the panel's monitor "
                              "readout if any of the fields below are given")
@@ -565,6 +623,10 @@ def main() -> int:
             return 0
         if args.handshake:
             return cmd_handshake(args)
+        if args.battery:
+            return cmd_battery(args)
+        if args.win_lock is not None:
+            return cmd_win_lock(args)
         # --effect first: --color doubles as the effect's colour parameter.
         if args.effect:
             return cmd_effect(args)
