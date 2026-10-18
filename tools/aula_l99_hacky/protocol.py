@@ -1228,9 +1228,10 @@ def parse_dongle_battery_reply(reply: bytes) -> int | None:
 
 
 def build_dongle_lighting_packet(mode: int, rgb: tuple[int, int, int] = (255, 0, 0),
-                                direction: int = 0, brightness: int = 5, speed: int = 3) -> bytes:
+                                direction: int = 0, brightness: int = 5, speed: int = 3,
+                                colorful: bool = False) -> bytes:
     """Build a 32-byte lighting effect packet for the 2.4GHz dongle path.
-    Confirmed on AULA L99 hardware across all 20 lighting modes."""
+    Confirmed against Wireshark captures across all 20 lighting modes, direction, and palette toggles."""
     body = bytearray(DONGLE_PACKET_SIZE - 1)
     body[0] = 0x05
     body[1] = 0x10
@@ -1238,9 +1239,10 @@ def build_dongle_lighting_packet(mode: int, rgb: tuple[int, int, int] = (255, 0,
     body[4] = rgb[0] & 0xFF
     body[5] = rgb[1] & 0xFF
     body[6] = rgb[2] & 0xFF
-    body[11] = direction & 0x01
-    body[12] = max(1, min(5, brightness))
-    body[13] = max(1, min(5, speed))
+    body[11] = 0x01 if colorful else 0x00  # 0=Palette (custom RGB), 1=Colorful (multi-color)
+    body[12] = max(0, min(5, brightness))
+    body[13] = max(0, min(5, speed))
+    body[14] = 0x01 if direction else 0x00  # 0=Left to Right, 1=Right to Left
     body[17] = 0xAA
     body[18] = 0x55
     return finalize_dongle_packet(bytes(body))
@@ -1273,15 +1275,43 @@ def build_dongle_sleep_time_packet(level: int) -> bytes:
 
 def build_dongle_shortcut_lock_packet(win_lock: bool = False, alt_tab_lock: bool = False,
                                       alt_f4_lock: bool = False) -> bytes:
-    """Build a 32-byte shortcut lock packet (Win key, Alt+Tab, Alt+F4 locks)."""
+    """Build a 32-byte shortcut lock packet (Win key, Alt+Tab, Alt+F4 locks).
+    Verified byte mapping from official AULA Windows driver capture:
+      Byte 5: Alt+Tab lock (1=disabled/locked, 0=enabled)
+      Byte 6: Alt+F4 lock  (1=disabled/locked, 0=enabled)
+      Byte 7: Win key lock (1=disabled/locked, 0=enabled)
+      Byte 11: 0x01
+    """
     body = bytearray(DONGLE_PACKET_SIZE - 1)
     body[0] = 0x07
     body[1] = 0x10
     body[4] = 0x01
-    body[5] = 1 if win_lock else 0
-    body[6] = 1 if alt_tab_lock else 0
-    body[7] = 1 if alt_f4_lock else 0
+    body[5] = 1 if alt_tab_lock else 0
+    body[6] = 1 if alt_f4_lock else 0
+    body[7] = 1 if win_lock else 0
     body[11] = 0x01
     body[17] = 0xAA
     body[18] = 0x55
     return finalize_dongle_packet(bytes(body))
+
+
+def build_dongle_ident_query() -> bytes:
+    """Build a 32-byte hardware identification/online presence query packet."""
+    body = bytearray(DONGLE_PACKET_SIZE - 1)
+    body[0] = 0x02
+    return finalize_dongle_packet(bytes(body))
+
+
+def parse_dongle_ident_reply(reply: bytes) -> dict | None:
+    """Extract hardware metadata from a 0x02 dongle identification reply."""
+    if len(reply) >= 14 and reply[0] == 0x02:
+        vid = (reply[8] << 8) | reply[7]
+        pid = (reply[10] << 8) | reply[9]
+        fw_ver = f"{reply[11]}.{reply[12]}"
+        return {
+            "vid": f"{vid:04x}",
+            "pid": f"{pid:04x}",
+            "firmware": fw_ver,
+            "connected": True,
+        }
+    return None

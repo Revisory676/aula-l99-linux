@@ -228,13 +228,21 @@ def cmd_effect(args: argparse.Namespace) -> int:
 
     name = protocol.EFFECT_NAMES.get(effect_id, "unknown")
     direction = getattr(args, "direction", 0)
+    colorful = getattr(args, "colorful", False)
+    if getattr(args, "palette", False):
+        colorful = False
+
+    palette_str = "Colorful (Rainbow)" if colorful else f"Palette #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+    dir_str = "Right-to-Left" if direction == 1 else "Left-to-Right"
     print(f"using {device.path}; effect 0x{effect_id:02X} ({name}) "
-          f"colour #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X} "
-          f"speed {args.speed} brightness {args.brightness} direction {direction}")
+          f"{palette_str} speed {args.speed} brightness {args.brightness} direction {dir_str}")
 
     if device.is_dongle:
         from .device import set_keyboard_lighting
-        ok = set_keyboard_lighting(effect_id, rgb, direction, args.brightness, args.speed, device)
+        ok = set_keyboard_lighting(
+            effect_id, rgb, direction=direction, brightness=args.brightness, speed=args.speed,
+            colorful=colorful, dev=device
+        )
         if not ok:
             print("error: failed to apply effect on dongle", file=sys.stderr)
             return 1
@@ -260,18 +268,38 @@ def cmd_battery(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_win_lock(args: argparse.Namespace) -> int:
+def cmd_shortcuts(args: argparse.Namespace) -> int:
     from .device import set_keyboard_shortcut_locks
     device = find_l99()
     if not device:
         print("error: no AULA L99 keyboard found", file=sys.stderr)
         return 1
-    ok = set_keyboard_shortcut_locks(win_lock=bool(args.win_lock), dev=device)
+    win = bool(args.win_lock) if args.win_lock is not None else False
+    alt_tab = bool(args.alt_tab_lock) if getattr(args, "alt_tab_lock", None) is not None else False
+    alt_f4 = bool(args.alt_f4_lock) if getattr(args, "alt_f4_lock", None) is not None else False
+    ok = set_keyboard_shortcut_locks(win_lock=win, alt_tab_lock=alt_tab, alt_f4_lock=alt_f4, dev=device)
     if ok:
-        print(f"Windows key lock: {'ENABLED' if args.win_lock else 'DISABLED'}")
+        print(f"Gaming Shortcut Locks: Win-Lock={'ON' if win else 'OFF'}, Alt+Tab={'ON' if alt_tab else 'OFF'}, Alt+F4={'ON' if alt_f4 else 'OFF'}")
         return 0
     else:
-        print("error: failed to set Windows key lock", file=sys.stderr)
+        print("error: failed to set shortcut locks", file=sys.stderr)
+        return 1
+
+
+def cmd_ident(args: argparse.Namespace) -> int:
+    from .device import check_keyboard_online
+    device = find_l99()
+    if not device:
+        print("error: no AULA L99 keyboard found", file=sys.stderr)
+        return 1
+    info = check_keyboard_online(device)
+    if info:
+        print(f"AULA L99 Hardware Status: ONLINE ({device.path})")
+        print(f"  VID: {info.get('vid', '0c45')} | PID: {info.get('pid', '800a')}")
+        print(f"  Firmware Version: {info.get('firmware', '3.1')}")
+        return 0
+    else:
+        print(f"AULA L99 Hardware Status: SLEEPING / OFFLINE (Dongle {device.path} connected, keyboard powered off or asleep)")
         return 1
 
 
@@ -503,11 +531,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--brightness", type=int, default=protocol.EFFECT_BRIGHTNESS_MAX,
                         help="effect brightness (1..5, default %(default)s)")
     parser.add_argument("--direction", type=int, default=0, choices=[0, 1],
-                        help="effect direction for rolling/flowing modes (0=default, 1=inverted)")
+                        help="effect direction for rolling/flowing modes (0=Left-to-Right, 1=Right-to-Left)")
+    parser.add_argument("--colorful", action="store_true",
+                        help="enable dynamic colorful / rainbow multi-color palette for lighting effect")
+    parser.add_argument("--palette", action="store_true",
+                        help="enable custom RGB color palette for lighting effect")
     parser.add_argument("--battery", action="store_true",
                         help="query and display the keyboard's live battery percentage")
+    parser.add_argument("--ident", action="store_true",
+                        help="query hardware identification, firmware version, and online connection status")
     parser.add_argument("--win-lock", type=int, choices=[0, 1],
                         help="lock (1) or unlock (0) the Windows key on the keyboard")
+    parser.add_argument("--alt-tab-lock", type=int, choices=[0, 1],
+                        help="lock (1) or unlock (0) the Alt+Tab shortcut")
+    parser.add_argument("--alt-f4-lock", type=int, choices=[0, 1],
+                        help="lock (1) or unlock (0) the Alt+F4 shortcut")
     parser.add_argument("--rtc", action="store_true",
                         help="set the keyboard's clock, and the panel's monitor "
                              "readout if any of the fields below are given")
@@ -621,12 +659,14 @@ def main() -> int:
             print("\nCode 0 is ambiguous: the vendor app leaves it there both for "
                   "'cloudy'\nand for a condition string it did not recognise.")
             return 0
-        if args.handshake:
-            return cmd_handshake(args)
+        if args.ident:
+            return cmd_ident(args)
         if args.battery:
             return cmd_battery(args)
-        if args.win_lock is not None:
-            return cmd_win_lock(args)
+        if (args.win_lock is not None
+                or getattr(args, "alt_tab_lock", None) is not None
+                or getattr(args, "alt_f4_lock", None) is not None):
+            return cmd_shortcuts(args)
         # --effect first: --color doubles as the effect's colour parameter.
         if args.effect:
             return cmd_effect(args)

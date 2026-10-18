@@ -198,16 +198,41 @@ def query_keyboard_battery(dev: HidrawDevice | None = None) -> int | None:
         return None
 
 
+def check_keyboard_online(dev: HidrawDevice | None = None) -> dict | None:
+    """Check if the physical AULA L99 keyboard is actively connected/awake over 2.4GHz dongle.
+    Returns device identification metadata if connected, or None if powered off / sleeping."""
+    from . import protocol
+    if dev is None:
+        dev = find_l99()
+    if not dev:
+        return None
+    if not dev.is_dongle:
+        return {"connected": True, "mode": "wired"}
+    try:
+        with HidrawTransport(dev.path, timeout_seconds=0.4) as transport:
+            transport.drain()
+            pkt = protocol.build_dongle_ident_query()
+            transport.write(bytes([protocol.REPORT_ID]) + pkt)
+            reply = transport.read_report(64)
+            return protocol.parse_dongle_ident_reply(reply)
+    except Exception:
+        return None
+
+
 def set_keyboard_lighting(
     mode: int,
     rgb: tuple[int, int, int] = (255, 0, 0),
     direction: int = 0,
     brightness: int = 5,
     speed: int = 3,
+    colorful: bool = False,
     dev: HidrawDevice | None = None,
 ) -> bool:
     """Set RGB lighting effect for AULA L99 across both 2.4GHz dongle and cable."""
     from . import protocol
+    if isinstance(colorful, HidrawDevice):
+        dev = colorful
+        colorful = False
     if dev is None:
         dev = find_l99()
     if not dev:
@@ -216,7 +241,9 @@ def set_keyboard_lighting(
         with HidrawTransport(dev.path, timeout_seconds=1.5) as transport:
             transport.drain()
             if dev.is_dongle:
-                pkt = protocol.build_dongle_lighting_packet(mode, rgb, direction, brightness, speed)
+                pkt = protocol.build_dongle_lighting_packet(
+                    mode, rgb, direction=direction, brightness=brightness, speed=speed, colorful=colorful
+                )
                 transport.write(bytes([protocol.REPORT_ID]) + pkt)
                 reply = transport.read_report(64)
                 return bool(reply and reply[0] == 0x05)
